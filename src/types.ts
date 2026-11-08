@@ -25,3 +25,8 @@ export interface Credentials {
   username: string;
   password: string;
 }
+
+export interface AccessTokenResponse {
+  access: string;
+  user?: UserProfile;
+}

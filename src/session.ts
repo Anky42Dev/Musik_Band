@@ -1,4 +1,4 @@
-import { api, ApiError } from './api';
+import { api, ApiError, refreshAccessToken } from './api';
 import type { UserProfile } from './types';
 
 let current: UserProfile | null = null;
@@ -15,10 +15,11 @@ export function onSessionChange(fn: () => void): void {
   listeners.add(fn);
 }
 
-/** Сессия хранится в HttpOnly-cookie, поэтому состояние входа узнаём запросом профиля. */
+/** После перезагрузки access-токена нет: получаем его по refresh-cookie и загружаем профиль. */
 export async function restoreSession(): Promise<void> {
   try {
-    setUser(await api.getProfile());
+    const token = await refreshAccessToken();
+    setUser(token ? await api.getProfile() : null);
   } catch (error: unknown) {
     if (!(error instanceof ApiError) || error.status === 0) throw error;
     setUser(null);

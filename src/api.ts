@@ -1,6 +1,6 @@
-import type { Credentials, ProfilePatch, SpecializationChoice, UserProfile } from './types';
+import type { AccessTokenResponse, Credentials, ProfilePatch, SpecializationChoice, UserProfile } from './types';
 
-const API_URL: string = import.meta.env.VITE_API_URL ?? 'https://inai-col2.fishrungames.com/api';
+const API_URL: string = import.meta.env.VITE_API_URL ?? 'https://inai-col3.fishrungames.com/api';
 
 export class ApiError extends Error {
   constructor(
@@ -28,29 +28,70 @@ export function parseErrorBody(body: unknown, status: number): ApiError {
   return new ApiError(`Ошибка сервера (${status}).`, status);
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+/** Access-токен живёт только в памяти; refresh-токен хранится сервером в HttpOnly-cookie. */
+let accessToken: string | null = null;
+let refreshing: Promise<string | null> | null = null;
+
+export const setAccessToken = (token: string | null): void => {
+  accessToken = token;
+};
+
+async function send(path: string, init: RequestInit): Promise<{ status: number; ok: boolean; body: unknown }> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
   let response: Response;
   try {
-    response = await fetch(`${API_URL}${path}`, {
-      ...init,
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json', ...init.headers },
-    });
+    response = await fetch(`${API_URL}${path}`, { ...init, credentials: 'include', headers });
   } catch {
     throw new ApiError('Нет связи с сервером. Попробуйте позже.', 0);
   }
   const body: unknown = await response.json().catch(() => null);
-  if (!response.ok) throw parseErrorBody(body, response.status);
-  return body as T;
+  return { status: response.status, ok: response.ok, body };
+}
+
+/** Обновляет access-токен по refresh-cookie; параллельные вызовы делят один запрос. */
+export function refreshAccessToken(): Promise<string | null> {
+  refreshing ??= (async () => {
+    try {
+      const res = await send('/token/refresh/', { method: 'POST' });
+      const token = res.ok ? (res.body as { access?: string } | null)?.access ?? null : null;
+      accessToken = token;
+      return token;
+    } finally {
+      refreshing = null;
+    }
+  })();
+  return refreshing;
+}
+
+async function request<T>(path: string, init: RequestInit = {}, retry = true): Promise<T> {
+  let res = await send(path, init);
+  if (res.status === 401 && retry && accessToken !== null) {
+    if (await refreshAccessToken()) res = await send(path, init);
+  }
+  if (!res.ok) throw parseErrorBody(res.body, res.status);
+  return res.body as T;
 }
 
 const post = <T>(path: string, data?: unknown) =>
   request<T>(path, { method: 'POST', body: data === undefined ? undefined : JSON.stringify(data) });
 
+async function authenticate(path: string, credentials: Credentials): Promise<UserProfile> {
+  const { access, user } = await post<AccessTokenResponse>(path, credentials);
+  accessToken = access;
+  return user ?? request<UserProfile>('/profile/');
+}
+
 export const api = {
-  register: (credentials: Credentials) => post<UserProfile>('/register/', credentials),
-  login: (credentials: Credentials) => post<UserProfile>('/login/', credentials),
-  logout: () => post<{ detail: string }>('/logout/'),
+  register: (credentials: Credentials) => authenticate('/register/', credentials),
+  login: (credentials: Credentials) => authenticate('/login/', credentials),
+  logout: async () => {
+    try {
+      return await post<{ detail: string }>('/logout/');
+    } finally {
+      accessToken = null;
+    }
+  },
   getProfile: () => request<UserProfile>('/profile/'),
   updateProfile: (patch: ProfilePatch) =>
     request<UserProfile>('/profile/', { method: 'PATCH', body: JSON.stringify(patch) }),
